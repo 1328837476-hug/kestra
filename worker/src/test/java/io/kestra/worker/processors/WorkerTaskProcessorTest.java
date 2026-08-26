@@ -10,7 +10,9 @@ import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.metrics.MetricRegistry;
+import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
+import io.kestra.core.models.assets.Custom;
 import io.kestra.core.models.executions.Execution;
 import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.executions.TaskRun;
@@ -235,6 +237,61 @@ class WorkerTaskProcessorTest {
         assertThat(escalationLog.getMessage()).contains("SUCCESS").contains("WARNING").contains("WARN");
     }
 
+    // kestra-ee#10347: a task's declared asset input/output with no id must fail only that task,
+    // with a clear error naming the bad field, and never reach the repository layer. The task
+    // fails outright (not merely per assetFailureBehavior): runContext.validate(task) re-checks
+    // the whole task bean on every property render, and the worker renders the task's `timeout`
+    // before running it, so the constraint violation surfaces there regardless of configuration.
+    @Test
+    void shouldFailTaskWhenAssetOutputHasNoId() throws Exception {
+        InMemoryWorkerQueue<WorkerTaskResult> resultQueue = new InMemoryWorkerQueue<>(100);
+        WorkerTaskProcessor processor = newProcessor(resultQueue);
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        logQueue.addListener(logs::add);
+
+        processor.process(assetOutputMissingIdWorkerTask(AssetFailureBehavior.WARN));
+
+        List<WorkerTaskResult> results = drain(resultQueue);
+        String taskRunId = results.getLast().getTaskRun().getId();
+        assertThat(results.getLast().getTaskRun().getState().getCurrent()).isEqualTo(State.Type.FAILED);
+        assertThat(results.getLast().getTaskRun().getAssetEmits()).isNullOrEmpty();
+        LogEntry errorLog = TestsUtils.awaitLog(logs, log -> taskRunId.equals(log.getTaskRunId()) && log.getMessage() != null && log.getMessage().contains("must not be blank"));
+        assertThat(errorLog).isNotNull();
+        assertThat(errorLog.getMessage()).contains("outputs").contains("id");
+    }
+
+    @Test
+    void shouldFailTaskWhenAssetInputHasNoId() throws Exception {
+        InMemoryWorkerQueue<WorkerTaskResult> resultQueue = new InMemoryWorkerQueue<>(100);
+        WorkerTaskProcessor processor = newProcessor(resultQueue);
+        List<LogEntry> logs = new CopyOnWriteArrayList<>();
+        logQueue.addListener(logs::add);
+
+        processor.process(assetInputMissingIdWorkerTask(AssetFailureBehavior.WARN));
+
+        List<WorkerTaskResult> results = drain(resultQueue);
+        String taskRunId = results.getLast().getTaskRun().getId();
+        assertThat(results.getLast().getTaskRun().getState().getCurrent()).isEqualTo(State.Type.FAILED);
+        assertThat(results.getLast().getTaskRun().getAssetEmits()).isNullOrEmpty();
+        LogEntry errorLog = TestsUtils.awaitLog(logs, log -> taskRunId.equals(log.getTaskRunId()) && log.getMessage() != null && log.getMessage().contains("must not be blank"));
+        assertThat(errorLog).isNotNull();
+        assertThat(errorLog.getMessage()).contains("inputs").contains("id");
+    }
+
+    @Test
+    void shouldFailTaskWhenAssetOutputHasNoIdEvenWhenBehaviorIsIgnore() throws Exception {
+        InMemoryWorkerQueue<WorkerTaskResult> resultQueue = new InMemoryWorkerQueue<>(100);
+        WorkerTaskProcessor processor = newProcessor(resultQueue);
+
+        // IGNORE would otherwise silently drop a soft asset-emission failure (see
+        // shouldKeepSuccessWhenAssetEmissionFailsAndBehaviorIsIgnore); a malformed declaration
+        // must not be swallowed the same way — this is the exact regression the issue reports.
+        processor.process(assetOutputMissingIdWorkerTask(AssetFailureBehavior.IGNORE));
+
+        List<WorkerTaskResult> results = drain(resultQueue);
+        assertThat(results.getLast().getTaskRun().getState().getCurrent()).isEqualTo(State.Type.FAILED);
+    }
+
     private WorkerTaskProcessor newProcessor(WorkerQueue<WorkerTaskResult> resultQueue) {
         return new WorkerTaskProcessor(
             "test-worker",
@@ -285,6 +342,40 @@ class WorkerTaskProcessorTest {
             .allowWarning(allowWarning)
             // rendered value is a plain string, not JSON, so binding it as List<AssetIdentifier> fails
             .assets(new AssetsDeclaration(Property.ofValue(false), Property.ofExpression("{{ 'not-json' }}"), Property.ofValue(List.of()), Property.ofValue(assetFailureBehavior)))
+            .build();
+
+        return workerTaskFor(task);
+    }
+
+    private WorkerTask assetOutputMissingIdWorkerTask(AssetFailureBehavior assetFailureBehavior) {
+        AssetEmissionFailure task = AssetEmissionFailure.builder()
+            .type(AssetEmissionFailure.class.getName())
+            .id("asset-output-missing-id-task")
+            .assets(
+                new AssetsDeclaration(
+                    Property.ofValue(false),
+                    Property.ofValue(List.of()),
+                    Property.ofValue(List.of(Custom.builder().namespace("io.kestra.tests").type("custom").build())),
+                    Property.ofValue(assetFailureBehavior)
+                )
+            )
+            .build();
+
+        return workerTaskFor(task);
+    }
+
+    private WorkerTask assetInputMissingIdWorkerTask(AssetFailureBehavior assetFailureBehavior) {
+        AssetEmissionFailure task = AssetEmissionFailure.builder()
+            .type(AssetEmissionFailure.class.getName())
+            .id("asset-input-missing-id-task")
+            .assets(
+                new AssetsDeclaration(
+                    Property.ofValue(false),
+                    Property.ofValue(List.of(new AssetIdentifier(null, "io.kestra.tests", null, "custom"))),
+                    Property.ofValue(List.of()),
+                    Property.ofValue(assetFailureBehavior)
+                )
+            )
             .build();
 
         return workerTaskFor(task);

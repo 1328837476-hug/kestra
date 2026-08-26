@@ -48,6 +48,7 @@ import io.kestra.worker.processors.internals.WorkerTaskCallable;
 import io.kestra.worker.queues.WorkerQueue;
 import io.kestra.worker.services.ExecutionKilledManager;
 
+import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 
 import static io.kestra.core.models.flows.State.Type.*;
@@ -295,7 +296,9 @@ public class WorkerTaskProcessor extends AbstractWorkerJobProcessor<WorkerTask> 
                 if (assetsDeclaration != null) {
                     try {
                         assetFailureBehavior = runContext.render(assetsDeclaration.getAssetFailureBehavior()).as(AssetFailureBehavior.class).orElse(AssetFailureBehavior.WARN);
-                    } catch (IllegalVariableEvaluationException e) {
+                    } catch (IllegalVariableEvaluationException | ConstraintViolationException e) {
+                        // validate() re-checks the whole task bean, so a bad assets declaration (the reason
+                        // assetEmissionFailed is true) throws again here too — same fallback as a render failure
                         runContext.logger().warn("Unable to render assetFailureBehavior, defaulting to WARN", e);
                     }
                 }

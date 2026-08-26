@@ -1,5 +1,6 @@
 package io.kestra.core.validations.extractors;
 
+import java.util.List;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
@@ -31,6 +32,28 @@ public class PropertyValueExtractorTest {
         assertThat(violations.size()).isEqualTo(1);
         ConstraintViolation<DynamicPropertyDto> violation = violations.stream().findFirst().get();
         assertThat(violation.getMessage()).isEqualTo("must be greater than or equal to 10");
+    }
+
+    // Gating experiment for kestra-ee#10347: proves @Valid cascades through a Property's list
+    // elements only when placed on the type argument (Property<List<@Valid X>>), not the field.
+    @Test
+    public void should_cascade_valid_into_property_list_elements() {
+        DynamicPropertyDto blank = new DynamicPropertyDto(
+            Property.ofValue(20), Property.ofValue("Test"), Property.ofValue(List.of(new NestedDto(" ")))
+        );
+        Set<ConstraintViolation<DynamicPropertyDto>> violations = validator.validate(blank);
+        assertThat(violations).isNotEmpty();
+        assertThat(violations.stream().findFirst().get().getPropertyPath().toString()).contains("list").contains("id");
+
+        DynamicPropertyDto ok = new DynamicPropertyDto(
+            Property.ofValue(20), Property.ofValue("Test"), Property.ofValue(List.of(new NestedDto("ok")))
+        );
+        assertTrue(validator.validate(ok).isEmpty());
+
+        DynamicPropertyDto expression = new DynamicPropertyDto(
+            Property.ofValue(20), Property.ofValue("Test"), Property.ofExpression("{{ x }}")
+        );
+        assertTrue(validator.validate(expression).isEmpty());
     }
 
 }
